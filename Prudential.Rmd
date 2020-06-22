@@ -1,0 +1,1003 @@
+---
+title: "Capstone Project Prudential"
+author: "Sarah Jewel"
+date: "22.6.2020"
+output: pdf_document
+---
+
+```{r setup, echo = FALSE }
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE,message = FALSE, fig.width = 4, fig.height = 2.5)
+```
+
+### 1. Executive Summary
+
+Prudential Life Insurance wanted to develop a predictive model that accurately classifies risk using an automated approach and was looking for data scientists. For this they announced a Kaggle competition in 2016.
+
+They provided a data set of life insurance applications with more than hundred variables describing attributes of the life insurance applicants. The task was to predict the "Response" variable for each Id in the test set. "Response" is an ordinal measure of risk that has 8 levels.
+
+In this report the process of analyzing these data and building some models is described. As the test set provided from Prudential does not include the Response variable it is ignored in this analysis. So a test set is sampled out of the train data here. The quadratic weighted kappa is used as metric as well as on the train set as on the test set. As the submissions were based on this metric in the contest, the results are roughly comparable with the results of the competition. The wínner had a score of 0.67938 based on the test data provided from Prudential.
+
+The quadratic weighted kappa measures the agreement between the result of the model and the result of deciding by chance. In case of a full agreement between the response of the model and the true result kappa is 1. If the result is not better than a result by random guessing kappa will be zero or even negative. 
+
+After a descriptive analysis of all fields of the data, several models are developed. Starting point is a simple linear model. In the next step generalized linear models were developed and finally a random forest model which turned out as the best model among the models calculated here.
+
+
+```{r install and load libraries, message=FALSE, results='hide'}
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(glmnet)) install.packages("glmnet", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("matrixStats", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(ranger)) install.packages("ranger", repos = "http://cran.us.r-project.org")
+
+
+library(data.table)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(matrixStats)
+library(ggplot2)
+library(ranger)
+```
+
+```{r, message=FALSE, results='hide'}
+# process in parallel for libraries which support this
+if(!require(doParallel)) install.packages("doParallel", repos = "http://cran.us.r-project.org")
+library(doParallel) 
+cl <- makeCluster(detectCores(), type='PSOCK')
+registerDoParallel(cl)
+```
+
+```{r, load data}
+
+# load local train data
+# dl <- "train.csv.zip"
+# dl <- "readtrain.csv.zip"
+# trainOrig <- fread(text=readLines(unzip(dl, "train.csv")))
+
+# upload data from github
+ zipurl <- "https://github.com/SiJaschke/Prudential/blob/master/train.csv.zip?raw=true"
+ destination_file <- "readtrain.csv.zip"
+ download.file(zipurl, destination_file, mode="wb")
+ unzip("readtrain.csv.zip")
+ trainOrig = fread(file="train.csv")
+```
+
+
+### 2. Descriptive Analysis and preparation of data
+
+The data set has `r dim(trainOrig)[1]` rows and  `r dim(trainOrig)[2]` columns.  
+The data format is a data table.
+```{r, results='hide'}
+class(trainOrig)
+```
+```{r}
+train <- trainOrig
+```
+  
+
+```{r}
+# set the seed to get always the same results
+set.seed(1, sample.kind="Rounding")
+#set.seed(1)
+```
+
+In the following all fields are analyzed, normalized, if necessary, and NAs are replaced.  
+  
+Some fields as e.g. Ins_Age are already normalized, other fields not. These will also be normalized to values between 0 and 1. As some of the Medical_History fields have values between `r range(unique(train$Medical_History_10)[-1])` the factor 1/240 is used for the normalization of the remaining continuous fields.
+In case of NAs in theses numeric fields it seems to be reasonable to use the same value, but negative, to set the values to this small negative value instead of NA:   
+
+```{r, NA, echo=TRUE}
+repNA <- -1/240
+repNA
+```  
+  
+#### Id  
+  
+The Id in the first column is a unique identifier for the applications. (same number of different values as number of rows) 
+```{r, Id, echo = FALSE}
+### Id
+# Id	unique identifier in first column 
+n_distinct(train$Id)
+# Id not used in the analysis
+
+```
+  
+
+
+#### Product_info  
+  
+The fields Product_Info_1-7	are a set of normalized variables relating to the insurance product applied for.
+```{r, Product Info}
+cols <- paste0("Product_Info_",1:7)
+sapply(cols,function(i) {return(class(train[[i]]))})
+```
+
+The field Product_Info_2 is a character field, which is converted to factors, with these values:
+```{r}
+# Product_Info_2 is a character
+unique(train$Product_Info_2)
+
+
+```
+The distribution of the values of this field in the data:  
+
+```{r, fig.width = 6}
+# plot of distribution
+train %>% 
+  group_by(Product_Info_2) %>%
+  summarize(n=n())%>%
+  ggplot(aes(Product_Info_2,n)) +
+  geom_bar(stat="identity") 
+
+```
+
+```{r, results = 'hide'}
+# check if NAs
+sum(is.na(train$Product_Info_2))
+# no NA
+# convert column to factors
+cols <- "Product_Info_2"
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+```
+
+The field Product_Info_4 contains continuous values between 0 and 1. Here is the distribution of the values:  
+
+```{r, fig.width = 6}
+# Product_Info_4 has continuous values 
+train %>% 
+  ggplot(aes(sample=Product_Info_4)) +
+  stat_qq(distribution=qunif, size=1) +
+  labs(title="Product_Info_4", x="percentage of observations", y="value")
+
+```
+\newpage  
+The majority of the rows have one of these 4 Product_Info_4 values:  
+So this field could be the sum insured with these 4 standard sums.
+
+```{r, echo=TRUE}
+train %>% 
+  group_by(Product_Info_4) %>%
+  summarize(n=n())%>%
+  filter(n>5000) 
+```
+
+```{r, results='hide'}
+# check if NAs
+sum(is.na(train$Product_Info_4))
+# no NA
+```
+The remaining Product_Info columns contain integer values, which are converted to factors.  
+
+```{r, results='hide'}
+cols <- paste0("Product_Info_",c(1,3,5:7))
+sapply(cols,function(i) unique(train[[i]]))
+# convert columns to factors
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+```
+
+```{r, fig.width = 6}
+# plot distribution of these 5 columns
+cols <- c("Id",cols)
+temp <- as.data.frame(melt(train[,..cols], id=1))
+temp %>% group_by(variable, value) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(value,n)) +
+  geom_bar(stat="identity") +
+  facet_grid(.~variable, scales="free")
+
+```
+  
+Most of the rows have the same value in these fields.  
+
+```{r, results='hide'}
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+# no NAs
+```
+
+#### Age, Height, Weight, BMI  
+
+The Ins_Age	is the normalized age of the applicants  
+
+```{r}
+train %>% ggplot(aes(Ins_Age)) +
+  geom_histogram(binwidth=0.01) 
+```
+  
+The field Ht is the normalized height of the applicants.  
+
+```{r}
+train %>% ggplot(aes(Ht)) +
+  geom_histogram(binwidth=0.01)
+```
+  
+Wt is the normalized weight of the applicants.      
+
+```{r}
+train %>% ggplot(aes(Wt)) +
+  geom_histogram(binwidth=0.01) 
+```
+  
+The field BMI contains the normalized BMI of the applicants.  
+
+```{r}
+train %>% ggplot(aes(BMI)) +
+  geom_histogram(binwidth=0.005) 
+```
+
+```{r, results='hide'}
+# check if NAs
+sum(is.na(train$Ins_Age))
+sum(is.na(train$Ht))
+sum(is.na(train$Wt))
+sum(is.na(train$BMI))
+# no NAs
+```
+\newpage  
+#### Employment_Info  
+The fields Employment_Info_1-6	is a set of normalized variables relating to the employment history of the applicants.  
+```{r}
+cols <- paste0("Employment_Info_",1:6)
+sapply(cols,function(i) {return(class(train[[i]]))})
+```
+
+```{r, results='hide'}
+# show existing values
+sapply(cols,function(i) {return(unique(train[[i]]))})
+```
+The 3 numeric fields Employment_info_1, 4 and 6 contain NAs whiche are replaced by -1/240.  
+
+```{r, echo=TRUE}
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+# lots of NAs replaced
+train[,(cols) := lapply(.SD, function(v) ifelse(is.na(v),repNA,v)), .SDcols=cols]
+```
+
+  
+Distribution of the 3 categorical variables:  
+These are converted to factors.
+
+```{r, fig.width = 5}
+cols <- c("Id",paste0("Employment_Info_",c(2,3,5)))
+temp <- as.data.frame(melt(train[,..cols], id=1))
+temp %>% group_by(variable, value) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(value,n)) +
+  geom_bar(stat="identity") +
+  facet_grid(.~variable, scales="free")
+# convert columns to factors  (exclude column Id)
+cols <- cols[-1]
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+```
+\newpage  
+Distribution of the 3 continuous variables:  
+
+```{r, fig.width = 5}
+par(mfrow=c(3,1))
+train %>% 
+  ggplot(aes(sample=Employment_Info_1)) +
+  stat_qq(distribution=qunif, size=1) +
+  labs(title="Employment_Info_1", x="percentage of observations", y="value")
+```
+
+```{r, fig.width = 5}
+train %>% 
+  ggplot(aes(sample=Employment_Info_4)) +
+  stat_qq(distribution=qunif, size=1) +
+  labs(title="Employment_Info_4", x="percentage of observations", y="value")
+```
+
+```{r, fig.width = 5}
+train %>% 
+  ggplot(aes(sample=Employment_Info_6)) +
+  stat_qq(distribution=qunif, size=1) +
+  labs(title="Employment_Info_6", x="percentage of observations", y="value")
+par(mfrow=c(1,1))
+```
+\newpage  
+#### Insured Info  
+
+The fields InsuredInfo_1-7 is a set of integer variables providing information about the applicants. These are converted to factors.  
+
+```{r}
+cols <- paste0("InsuredInfo_",1:7)
+sapply(cols,function(i) {return(class(train[[i]]))})
+
+```
+
+```{r, results='hide'}
+sapply(cols,function(i) {return(unique(train[[i]]))})
+# all categorical variables
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+# no NAs
+# convert columns to factors
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+```
+Distribution of these categorical variables:  
+
+```{r, fig.width = 7}
+cols <- c("Id", cols)
+temp <- as.data.frame(melt(train[,..cols], id=1))
+temp %>% group_by(variable, value) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(value,n)) +
+  geom_bar(stat="identity") +
+  facet_grid(.~variable, scales="free")
+```
+  
+#### Insurance History  
+
+The fields Insurance_History_1-9 is a set of variables relating to the insurance history of the applicant.  
+```{r}
+cols <- paste0("Insurance_History_",1:9)
+sapply(cols,function(i) {return(class(train[[i]]))})
+```
+
+```{r, results='hide'}
+sapply(cols,function(i) {return(unique(train[[i]]))})
+```
+
+```{r, fig.width = 5}
+# plot of the distribution of the one continuous variable
+train %>% 
+  ggplot(aes(sample=Insurance_History_5)) +
+  stat_qq(distribution=qunif, size=1) +
+  scale_y_log10()+ 
+  labs(title="Insurance_History_5", x="percentage of observations", y="value")
+```
+  
+The field Insurance_History_5 has lots of NAs, which are replaced by -1/240.  
+
+```{r}
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+# only Insurance_History_5 has lots of NAs
+# replace NAs by a small negative value
+train[,Insurance_History_5 := ifelse(is.na(train$Insurance_History_5),repNA,Insurance_History_5)]
+#range(train$Insurance_History_5)
+```
+  
+Distribution of the categorical variables (The column Insurance_History_6 does not exist.)  
+  
+```{r, fig.width = 7}
+# Insurance_History_6 does not exist
+cols <- c("Id", cols[c(-5,-6)])
+temp <- as.data.frame(melt(train[,..cols], id=1))
+temp %>% group_by(variable, value) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(value,n)) +
+  geom_bar(stat="identity") +
+  facet_grid(.~variable, scales="free") +
+  theme(strip.text.x =element_text(size=6))
+# convert columns to factors
+cols <- cols[-1] # exclude id
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+```
+  
+Theses columns are converted to factors.  
+
+
+#### Family History  
+
+The fields Family_Hist_1-5	are a set of normalized variables relating to the family history of the applicant.
+
+```{r}
+cols <- paste0("Family_Hist_",1:5)
+sapply(cols,function(i) {return(class(train[[i]]))})
+
+```
+  
+```{r, results='hide'}
+sapply(cols,function(i) {return(unique(train[[i]]))})
+```
+  
+  
+Only the first field is a categorical variable, which is converted to factors.:  
+
+```{r}
+# plot of the categorical variable
+train %>% 
+  group_by(Family_Hist_1) %>%
+  summarize(n=n())%>%
+  ggplot(aes(Family_Hist_1,n)) +
+  geom_bar(stat="identity", size=0.1) 
+```
+  
+There are lots of NAs which are replaced by -1/240.
+
+```{r}
+# convert column to factors
+col <- cols[1] 
+train[, (col):= lapply(.SD, as.factor), .SDcols=col]
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+# lots of NAs in Family_History_2-5
+```
+ 
+Distribution of the 4 continuous variables:  
+
+```{r,fig.width = 7}
+cols <- c("Id", cols[-1])
+temp <- as.data.frame(melt(train[,..cols], id=1))
+temp %>% group_by(variable, value) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(value,n)) +
+  geom_point(size=1) +
+  scale_y_log10() +
+    facet_grid(.~variable)
+cols <- cols[-1]
+# replace NAs by a small negative value
+train[,(cols) := lapply(.SD, function(v) ifelse(is.na(v),repNA,v)), .SDcols=cols]
+```
+  
+#### Medical History  
+
+The fields Medical_History_1-41	are a set of integer variables relating to the medical history of the applicant.
+
+```{r}
+cols <- paste0("Medical_History_",1:41)
+sapply(cols,function(i) {return(class(train[[i]]))})
+```
+
+All variables are categorical, except Medical_History_1,10,15,24,32, which have values between 0 and 240. These are normalized by dividing by 240. NAs are replaced by -1/240. The categorical variables are converted to factors.   
+
+```{r, results='hide'}
+sapply(cols,function(i) {return(unique(train[[i]]))})
+# all variables are categorical, except Medical_History_1,10,15,24,32
+cols <- c("Id", cols)
+temp <- as.data.frame(melt(train[,..cols], id=1))
+# plots of variables (omit in report as too many)
+# par(mfcol=c(11,4))
+#temp %>% group_by(variable, value) %>%
+#  summarize(n=n()) %>%
+#  ggplot(aes(value,n)) +
+#  geom_bar(stat="identity") +
+#  facet_grid(.~variable, scales="free")
+# convert all categorical columns to factors
+cols <- cols[c(-1, -2, -11, -16, -25, -33)]
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+# the values in some Medical_History fields are between 0 and 240, these will be normalized
+range(train$Medical_History_10)
+# NAs are replaced by -1/240 and the values are normalized by dividing by 240 in following columns
+cols <- paste0("Medical_History_",c(1,10,15,24,32))
+# replace NAs by a small negative value
+train[,(cols) := lapply(.SD, function(v) ifelse(is.na(v),repNA,v/240)), .SDcols=cols]
+
+```
+  
+#### Medical Keywords  
+
+The fields Medical_Keyword_1-48	are a set of dummy variables relating to the presence of/absence of a medical keyword being associated with the application. These fields have only the values 0 or 1 and are converted to factors.  
+```{r, results='hide'}
+cols <- paste0("Medical_Keyword_",1:48)
+train[, lapply(.SD, range), .SDcols=cols]
+# check if NAs
+sapply(cols,function(i) sum(is.na(train[[i]])))
+
+# no NAs
+# convert columns to factors
+train[, (cols):= lapply(.SD, as.factor), .SDcols=cols]
+
+```
+    
+#### Response  
+
+Response is the target variable, an ordinal variable relating to the final decision associated with an application, having the following values:.
+
+```{r}
+class(train$Response)
+# can have the following values
+unique(train$Response)
+
+```
+
+Distribution of the values  
+
+```{r}
+train %>% 
+  group_by(Response) %>%
+  summarize(n=n())%>%
+  ggplot(aes(Response,n)) +
+  geom_bar(stat="identity") +
+  scale_x_continuous(breaks=seq(1,8,1))
+
+```
+  
+  
+  
+All factor variables are renamed ("_" added at the end, to distinguish variables that end with a digit in the design matrix). So these are the names of all columns:  
+```{r}
+idx <- sapply(train, class) == "factor"
+setnames(train, old=names(train)[idx], new=paste0(names(train)[idx],"_"))
+names(train)
+```
+
+\newpage  
+### 3. Analysis
+  
+First the following functions are defined, to assess the quality of the models:  
+
+```{r, echo=TRUE}
+# metric used in kaggle competition to measure the quality of the model
+# Kappa roughly measures how many predictions are "correct" over and above random guessing.
+# used here as well instead of a test set
+# code is taken from the 'Metrics' package with a minor modification
+ScoreQuadraticWeightedKappa = function (rater.a, rater.b, min.rating = min(c(rater.a, rater.b)), 
+                                        max.rating = max(c(rater.a, rater.b))){ 
+  rater.a <- factor(rater.a, levels = min.rating:max.rating)
+  rater.b <- factor(rater.b, levels = min.rating:max.rating)
+  confusion.mat <- table(data.frame(rater.a, rater.b))
+  confusion.mat <- confusion.mat/sum(confusion.mat)       # = empirical frequency of each pair
+  histogram.a <- table(rater.a)/length(table(rater.a))
+  histogram.b <- table(rater.b)/length(table(rater.b))
+  expected.mat <- histogram.a %*% t(histogram.b)
+  ## frequency of each pair if raters A and B guess independently:
+  expected.mat <- expected.mat/sum(expected.mat)
+  labels <- as.numeric(as.vector(names(histogram.a)))
+  weights <- outer(labels, labels, FUN = function(x, y) (x - y)^2)
+  1 - sum(weights * confusion.mat)/sum(weights * expected.mat)
+}
+
+## function that transforms non-integer predictions to the possible responses 1-8:
+SQWK = function(pred, y){
+  x = round(pred,0)
+  x = pmax(x,1)
+  x = pmin(x,8)
+  ScoreQuadraticWeightedKappa(as.integer(x), y, 1L, 8L)
+}
+
+## All top-ranked Kaggle submissions used an optimization step that searches
+## for the best "cut points" when translating a numeric (non-discretized)
+## prediction vector to the grid {1, 2, ..., 8}.
+
+## The following function can be used to compute the kappa metric with alternative
+## cut points:
+SQWK2 = function(pred, y, cuts){
+  x = findInterval(pred, cuts) +1L
+  ScoreQuadraticWeightedKappa(x, y, 1L, 8L)
+}
+
+## The following function performs the search for optimal cut points:
+optimalCuts = function(pred, y){
+  deltas0 = c(1.5,1,1,1,1,1,1)
+  fn = function(deltas) SQWK2(pred, y, cumsum(deltas))
+  res = optim(deltas0, fn, method="L-BFGS-B", lower=0.1, upper=2,
+              control=list(fnscale= -1, factr=1e5))
+  cumsum(res$par)
+}
+```
+
+  
+\newpage   
+For the analysis the column Id is ignored.  
+
+```{r, echo=TRUE}
+# exclude the first column with the row number
+train <- train[,2:128]
+```
+
+```{r, echo=TRUE}
+dim(train)
+
+```
+For models like e.g. generalized linear models a model matrix, also called design matrix, is needed as input. In the design matrix all factor variables are expanded, so that for every factor level a new variable is created.  
+```{r, echo=TRUE}
+# create model matrix
+x <- model.matrix(Response~., train)[,-1] # exclude column intercept
+# define y as response
+y <- train$Response
+```
+The model matrix x has `r dim(x)[2]` columns.  
+
+To assess the quality of the models the data are splitted into a training and a test set.
+```{r, echo=TRUE}
+# separate a test set
+set.seed(1, sample.kind="Rounding")
+testIdx <- sample.int(nrow(train),6000,replace=FALSE)
+test <- train[testIdx,] #%>% factor(levels = levels(train))
+train <- train[-testIdx,]
+# separate test set for model matrix
+xtest <- x[testIdx,]
+x     <- x[-testIdx,]
+```
+
+### 3.1. Linear Model  
+
+Let's start with a simple linear model, assuming the distribution of the error is normal.  
+
+
+```{r, echo=TRUE, results='hide'}
+y <- as.factor(train$Response)
+fit <- lm(Response ~ ., data=data.table(Response=train$Response,x))
+summary(fit)
+pred <- predict(fit, as.data.table(x))
+```
+The result of the linear regression   are continuous values as can be seen in this graphic.  
+To get the final prediction of the Response value optimal cuts for these results are calculated in the next step.  
+
+```{r, fig.width = 6, fig.height = 4}
+plot(pred, train$Response)
+```
+  
+So we get the following quadratic weighted kappas before optimizing the cuts:  
+```{r, echo=TRUE}
+# quadratic weighted kappa based on the direct result of the model
+resSQWK <- SQWK(pred, train$Response)
+resSQWK 
+# optimize cuts
+cuts <- optimalCuts(pred, y)
+cuts
+# quadratic weighted kappa based on the optimal cuts
+resSQWK2 <- SQWK2(pred, y, cuts)
+resSQWK2
+```
+The Score Quadratic Weighted Kappa is a lot better now with these optimized cuts.  
+
+Finally the prediction based on the test data is calculated and the corresponding SQWK2 out of sample (SQWK2oos) to assess the quality of the model.
+```{r, echo=TRUE}
+pred <- predict(fit, as.data.table(xtest))
+resSQWK2oos <- SQWK2(pred, test$Response, cuts)
+resSQWK2oos
+```
+
+  
+```{r}
+# Create a table to store the results of all models 
+results <- tibble(model = "Simple linear model", SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos)
+results %>% knitr::kable()
+```
+
+  
+Select the relevant variables from the last model and run the linear model again.    
+  
+```{r, echo=TRUE, results='hide'}
+fit.a <- anova(fit)
+colNames <- rownames(fit.a)[fit.a[,5] < 0.05]
+```
+Number of columns selected (last column excluded as named NA):
+```{r}
+l <- length(colNames)
+l-1
+```
+Run linear model again  
+
+```{r, echo=TRUE, results='hide'}
+form <- as.formula(paste("Response ~ ", paste(colNames[-l], collapse=" + ")))
+form
+xred <- model.matrix(form, data=data.table(Response=train$Response,x))[,-1]
+fit <- lm(Response ~ ., data=data.table(Response=train$Response, xred))
+summary(fit)
+anova(fit)
+pred <- predict(fit, as.data.table(xred))
+```
+
+```{r, echo=TRUE}
+resSQWK <- SQWK(pred, train$Response) 
+resSQWK 
+# optimize cuts
+cuts <- optimalCuts(pred, y)
+cuts
+resSQWK2 <- SQWK2(pred, y, cuts)
+resSQWK2
+```
+In-sample-measured, variable selection obviously decreases the prediction performance (regardless of whether optimal cuts are chosen). Measured out of sample, however, prediction performance increases.     
+
+```{r, echo=TRUE}
+# prediction for test data
+pred <- predict(fit, as.data.table(xtest))
+resSQWK2oos <- SQWK2(pred, test$Response, cuts)
+```
+
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                          tibble(model = "Linear model with selected variables",
+                                 SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos))
+
+results %>% knitr::kable()
+```
+
+
+### 3.2. Generalized linear model
+
+In the next step a generalized linear model is built using the package glmnet. For this purpose the model matrix x is used as input.   
+
+### 3.2.1. GLM - Lasso  
+
+First run glmnet with default values. In this case the penalty parameter alpha, which forces to shrink the coefficients towards zero, is set to 1. In this case some of the coefficients are set to exactly zero, so that it results in a  selection of variables.
+
+```{r, echo=TRUE}
+# define y as response
+y <- train$Response
+# alpha = 1 (=lasso penalty) default
+fit.glm <- glmnet(x,y) 
+```
+  
+In this plot the coefficients of the selected variables can be seen depending on lambda:  
+
+```{r, fig.width = 5, fig.height = 5}
+plot(fit.glm,xvar="lambda")
+```
+
+Depending on the plot the model of log(lambda) = -5 is selected assuming that enough variables are selected. The resulted SQWK is not very high, but the SQWK2, the results for the optimal cuts, is slightly higher. 
+```{r, echo=TRUE}
+pred.glm <- predict(fit.glm, newx=x, s=exp(-5))
+resSQWK <- SQWK(pred.glm, train$Response) 
+resSQWK
+cuts <- optimalCuts(pred.glm, y)
+cuts 
+resSQWK2 <- SQWK2(pred.glm, y, cuts) 
+resSQWK2
+```
+ 
+```{r, echo=TRUE}
+# prediction for test data
+pred.glm <- predict(fit.glm, xtest)
+resSQWK2oos <- SQWK2(pred.glm, test$Response, cuts)
+resSQWK2oos
+```
+ 
+ 
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                     tibble(model = "GLM - Lasso (alpha=1)",
+                            SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos))
+
+results %>% knitr::kable()
+```
+ 
+### 3.2.2. GLM - Ridge Regression  
+
+In the next model alpha is set to zero, so a Ridge Regression model is calculated in which all variables are considered.
+```{r, echo=TRUE}
+# alpha = 0 (Ridge Regression, all variables are selected)
+fit.glm.R <- glmnet(x,y, alpha=0) 
+```
+
+It can be seen from the following graph that all variables are included in all models.  
+
+```{r, fig.width = 5, fig.height = 5}
+plot(fit.glm.R,xvar="lambda")
+```
+  
+Selecting the model for log(lambda) = 0 the resulting kappas are lower than the kappas of the lasso model.
+```{r, echo=TRUE}
+# select lambda = exp(-2) just from plot
+pred.glm.R <- predict(fit.glm.R, newx=x, s=exp(0))
+resSQWK <- SQWK(pred.glm.R, train$Response) 
+resSQWK
+cuts <- optimalCuts(pred.glm.R, y)
+cuts 
+resSQWK2 <- SQWK2(pred.glm.R, y, cuts) 
+resSQWK2
+```
+  
+```{r, echo=TRUE}
+# prediction for test data
+pred.glm.R <- predict(fit.glm.R, xtest)
+resSQWK2oos <- SQWK2(pred.glm.R, test$Response, cuts)
+resSQWK2oos
+```
+  
+  
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                     tibble(model="GLM - Ridge Regression (alpha=0)",
+                            SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos))
+
+results %>% knitr::kable()
+```
+  
+### 3.2.3. GLM - Cross Validation  
+
+In the next step cross validation is used to find the optimal parameters alpha and lamda for the glm.
+```{r, echo = TRUE}
+# cross validation to optimize alpha and lambda
+# Restrict the maximum number of variables to 800.
+set.seed(1, sample.kind="Rounding")
+#set.seed(1)
+k = 10 # 10 fold cv
+# define the folds
+folds <- sample(1:k, nrow(train), replace=TRUE)
+# define a set of alphas from which the optimal has to be found
+alphas <- c(0.4, 0.6, 0.8, 0.85, 0.9, 0.95, 1)
+
+fit.cvglms <- lapply(alphas, function(alpha) {
+  return(cv.glmnet(x, y, alpha=alpha, nfolds=k, foldid=folds, standardize=TRUE,
+                         dfmax=800, trace.it=FALSE))
+})
+```
+\newpage  
+Here only one cv.glmnet object as example is plotted, as all look very similar.  
+
+```{r,fig.width = 4.5, fig.height = 4}
+plot(fit.cvglms[[6]])
+```
+  
+In the next plot the RMSE depending on lambda is to be seen for the different alphas.  
+
+```{r, fig.width = 4.5, fig.height = 4}
+# build a data table for results of different models
+l <- list(1,2,3,4,5,6,7)
+ldt <- lapply(l, function(i) {
+  cv <- fit.cvglms[[i]]
+  data.table(MSE=cv$cvm, s=cv$cvsd, lambda=cv$lambda, nzero=cv$nzero, alpha=alphas[i])
+})
+dt <- rbindlist(ldt)
+
+xyplot(sqrt(MSE) ~ log(lambda), groups=alpha, data=dt, type="l",xlab="log(lambda)",ylab="RMSE",
+       auto.key=list(lines=TRUE,points=FALSE,corner=c(0.1,0.9)),
+       scales=list(x=list(lim=c(-8,-2)),y=list(lim=c(1.94,1.97))))
+```
+\newpage
+In this plot the RMSE for the different alphas is to be seen.  
+
+```{r, fig.width = 4.5, fig.height = 3.5}
+mldt <- lapply(l, function(i){
+  cv <- fit.cvglms[[i]]
+  data.table(MSE=cv$cvm[which(cv$lambda.min==cv$lambda)], alpha=alphas[i])
+})
+# plot RMSE vs alpha
+mdt <- rbindlist(mldt)
+mdt %>% ggplot(aes(alpha, sqrt(MSE))) +
+   geom_point() +
+   geom_path() +
+  scale_x_continuous(breaks=seq(0.4,1,0.1)) +
+    ylab("RMSE")
+# look for alpha which minimizes the RMSE
+RMSE <- rep(NA, length(alphas))
+for (i in 1:length(alphas)) {
+ RMSE[i] <-  fit.cvglms[[i]]$cvm[which(fit.cvglms[[i]]$lambda == fit.cvglms[[i]]$lambda.min)]
+ RMSE[i] <- sqrt(RMSE[i])
+}
+alphaMin <- alphas[which.min(RMSE)]
+alphaMin 
+```
+
+The alpha which minimizes the RMSE is selected and the model for this alpha (=`r alphaMin`) is calculated.  
+```{r, echo = TRUE, message=FALSE, results='hide'}
+fit.cvglm <- cv.glmnet(x, y, alpha=alphaMin, nfolds=5, trace.it=1)
+```
+    
+This plot shows the MSE depending on log(lambda):  
+
+```{r, fig.width = 4.5, fig.height = 3.5}
+plot(fit.cvglm)
+```
+
+```{r, echo = TRUE}
+# s= value of penalty parameter lambda
+pred.cvglm <- predict(fit.cvglm, newx=x, s="lambda.min")
+resSQWK <- SQWK(pred.cvglm, train$Response) 
+resSQWK
+cuts <- optimalCuts(pred.cvglm, y)
+cuts 
+resSQWK2 <- SQWK2(pred.cvglm, y, cuts) 
+resSQWK2
+```
+
+```{r, echo=TRUE}
+# prediction for test data
+pred.cvglm <- predict(fit.cvglm, xtest)
+resSQWK2oos <- SQWK2(pred.cvglm, test$Response, cuts)
+resSQWK2oos
+```
+
+
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                     tibble(model="GLM - cross validation",
+                            SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos  ))
+
+results %>% knitr::kable()
+```
+
+Another option could be to select the lambda which has a distance of a standard deviation from the optimal lambda for the model. In this case the result is a bit lower, except SQWK2oos, but fewer variables are selected.
+```{r, echo=TRUE}
+# lambda 1 sd distance, fewer variables, but smaller SQWK
+pred.cvglm <- predict(fit.cvglm, newx=x, s="lambda.1se")
+resSQWK <-  SQWK(pred.cvglm, train$Response) 
+resSQWK
+cuts <- optimalCuts(pred.cvglm, y)
+cuts 
+resSQWK2 <- SQWK2(pred.cvglm, y, cuts)  
+resSQWK2
+```
+
+```{r, echo=TRUE}
+# prediction for test data
+pred.cvglm <- predict(fit.cvglm, xtest)
+resSQWK2oos <- SQWK2(pred.cvglm, test$Response, cuts)
+resSQWK2oos
+```
+
+
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                     tibble(model="GLM - cross validation (fewer variables)",
+                            SQWK = resSQWK, SQWK2 = resSQWK2 , SQWK2oos=resSQWK2oos ))
+
+results %>% knitr::kable()
+```
+
+
+
+### 3.3. Random forest
+
+The last model calculated is the random forest using the package ranger.
+
+```{r}
+set.seed(1, sample.kind="Rounding")
+#set.seed(1)
+```
+
+
+```{r, echo = TRUE, message=FALSE, results='hide'}
+fit.ranger <- ranger(x = x, y=train$Response,
+                     num.threads=32, verbose=TRUE,
+                     num.trees=400, mtry=80, max.depth=40,
+                     importance="impurity", write.forest=TRUE, oob.error=TRUE,
+                     min.node.size=3,
+                     replace=FALSE, sample.fraction=0.6)
+```
+
+In the following plot the 30 most important variables are to be seen:  
+
+```{r, fig.width = 5, fig.height = 6}
+# fit.ranger                               # summary
+i <- importance(fit.ranger)  
+barchart( ~sort(i, decreasing=TRUE)[1:30], horizontal=TRUE, origin=0, xlab="Coefficients")
+```
+
+```{r, echo=TRUE}
+pred.ranger <- fit.ranger$predictions
+resSQWK <- SQWK(pred.ranger, train$Response) 
+resSQWK
+cuts <- optimalCuts(pred.ranger, train$Response)
+cuts
+resSQWK2 <- SQWK2(pred.ranger, train$Response, cuts)  
+resSQWK2
+```
+
+```{r, echo=TRUE}
+# prediction for test data
+pred.ranger <- predict(fit.ranger, xtest)$predictions
+resSQWK2oos <- SQWK2(pred.ranger, test$Response, cuts)
+resSQWK2oos
+```
+
+
+```{r}
+# turn parallel processing off and run sequentially again:
+ registerDoSEQ()
+```
+
+### 4. Result  
+
+Looking at the results of all models applied:  
+
+```{r}
+# add result to table of results
+results <- bind_rows(results,
+                     tibble(model="Ranger - random forest",
+                            SQWK = resSQWK, SQWK2 = resSQWK2, SQWK2oos=resSQWK2oos  ))
+
+results %>% knitr::kable()
+```
+
+The best model is here the random forest model. With the random forest a Quadratic Weighted Kappa of `r resSQWK2` (in sample) and `r resSQWK2oos` (out of sample) is reached. The Kappa calculated based on the test data (SQWK2oos, out of sample) is mostly lower than the Kappa calculated based on the train data (SQWK2, in sample) as expected, because the model was fitted based on the train data.  
+The results show that a linear model is not useful for these data. All adjustments including regularization did not really improve the results. The reason is that there are nonlinear dependencies between variables and the Response which are only considered in the random forest model. In addition to this also interactions between variables are considered only in the random forest model.   
+
+### 5. Conclusions
+
+With all the models a Kappa is reached with a distance to the best result in the Kaggle competition (0.67938), which could be improved. 
+This could be reached by optimizing parameters of the models which were already used. Also adjustments of the data as e.g. the replacement of the NAs could be checked. It might be better for some columns to replace the NAs by a larger positive value instead of this small negative value.   
+A next step to further improve the results could be to try further models, e.g. a binary classification model. A combination of different models (ensembles) would also be possible. 
